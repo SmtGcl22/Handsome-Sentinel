@@ -13,8 +13,8 @@ const char *BOT_TOKEN = "8640490663:AAGHrGjDuRA19GfvtgRUQ43b4rUVp9jb5D8";    // 
 const char *CHAT_ID =
     "6377884612"; // Telegram Chat ID'niz (Size ait veya grubun ID'si)
 
-#define PIR_PIN 13 // PIR Sensörünün bağlı olduğu GPIO pini
-#define FLASH_PIN 4 // ESP32-CAM üzerindeki dahili flaş LED'inin GPIO pini
+#define PIR_PIN 3 // PIR Sensörünün bağlı olduğu GPIO pini (U0R pini - En temiz pin)
+#define FLASH_PIN 4 // ESP32-CAM üzerindeki flaş LED pinin GPIO pini
 
 // =========================================================================
 // AI-THINKER ESP32-CAM PIN TANIMLAMALARI
@@ -127,13 +127,19 @@ void setup() {
     return;
   }
 
+  Serial.println("Sensör kalibrasyonu için 20 saniye bekleniyor...");
+  for (int i = 20; i > 0; i--) {
+    Serial.print(i);
+    Serial.println(" saniye kaldi...");
+    delay(1000);
+  }
   Serial.println("Sistem hazır. Hareket bekleniyor...");
   bot.sendMessage(CHAT_ID,
                   "Güvenlik kamerası aktif edildi. Hareket bekleniyor...", "");
 }
 
 // =========================================================================
-// YAKIŞIKLI GÜVENLİK SÖZLERİ (ŞİMDİLİK SADECE METİN)
+// YAKIŞIKLI GÜVENLİK SÖZLERİ VE GIF'LERİ
 // =========================================================================
 const char* yakisikliSozler[] = {
   "Bitti bahaneler tükendi cümleler\nGüldüğüme bakma neler çektim ben neler 😎",
@@ -148,6 +154,22 @@ const char* yakisikliSozler[] = {
 };
 const int SOZ_SAYISI = 9;
 
+const char* yakisikliGifler[] = {
+  "https://i.hizliresim.com/5vuogsp.gif",
+  "https://i.hizliresim.com/i6hhjli.gif",
+  "https://i.hizliresim.com/dfusuue.gif",
+  "https://i.hizliresim.com/fcy4l91.gif",
+  "https://i.hizliresim.com/b19dpx6.gif",
+  "https://i.hizliresim.com/771g8xx.gif",
+  "https://i.hizliresim.com/oke0tkn.gif",
+  "https://i.hizliresim.com/8ibzsf2.gif",
+  "https://i.hizliresim.com/crx200k.gif",
+  "https://i.hizliresim.com/sjnlsxf.gif",
+  "https://i.hizliresim.com/ne4v078.gif",
+  "https://i.hizliresim.com/jxodovd.gif"
+};
+const int GIF_SAYISI = 12;
+
 // =========================================================================
 // ANA DÖNGÜ (LOOP)
 // =========================================================================
@@ -157,11 +179,7 @@ const unsigned long CALIBRATION_TIME = 20000; // Başlangıçta PIR sensörünü
 
 void loop() {
   unsigned long currentTime = millis();
-  
-  // Sensör kalibrasyonu bitmediyse (ilk açılışta sahte tetiklemeleri önler)
-  if (currentTime < CALIBRATION_TIME) {
-    return;
-  }
+
 
   int pirState = digitalRead(PIR_PIN);
 
@@ -172,9 +190,14 @@ void loop() {
       return; // Anlık bir gürültüyse (kablo teması vs.) yoksay
     }
 
-    // Gerçek hareket var ve spam süresi dolmuşsa
-    if (currentTime - lastPhotoTime >= PHOTO_COOLDOWN || lastPhotoTime == 0) {
-      Serial.println("Gerçek hareket algılandı! Fotoğraf çekiliyor...");
+    // ==========================================
+    // SPAM VE Wİ-Fİ PARAZİT KORUMASI (5 SANİYE)
+    // ==========================================
+    if (currentTime - lastPhotoTime < 5000 && lastPhotoTime != 0) {
+      return; // Sadece 5 saniyelik ufak bir sağırlık
+    }
+
+    Serial.println("Gerçek hareket algılandı! Fotoğraf çekiliyor...");
 
     // Flaş LED'i yak
     digitalWrite(FLASH_PIN, HIGH);
@@ -220,12 +243,29 @@ void loop() {
     } else {
       Serial.println("Fotoğraf başarıyla gönderildi!");
       
-      // Yakışıklı Güvenlik konsepti - Rastgele söz veya link gönder
-      int randomIndex = random(0, SOZ_SAYISI);
-      bot.sendMessage(CHAT_ID, String("🚨 ") + yakisikliSozler[randomIndex], "");
-      Serial.println("Yakışıklı Güvenlik mesajı gönderildi!");
+      // Yakışıklı Güvenlik konsepti - Rastgele GIF ve söz gönder
+      int randomSozIndex = random(0, SOZ_SAYISI);
+      int randomGifIndex = random(0, GIF_SAYISI);
       
-      lastPhotoTime = currentTime; // Başarılı gönderimde son çekim zamanını kaydet
+      String caption = String("🚨 ") + yakisikliSozler[randomSozIndex];
+      String fullMessage = caption + "\n\n" + String(yakisikliGifler[randomGifIndex]);
+      
+      bot.sendMessage(CHAT_ID, fullMessage, "");
+      
+      Serial.println("Yakışıklı Güvenlik GIF'i ve mesajı gönderildi!");
+      
+      Serial.println("Sensörün kapanması (LOW) bekleniyor...");
+      int waitLimit = 0;
+      while(digitalRead(PIR_PIN) == HIGH && waitLimit < 100) {
+        delay(100); // Sensör LOW olana kadar maksimum 10 saniye bekle
+        waitLimit++;
+      }
+      
+      Serial.println("Sensör sıfırlandı veya zaman aşımı!");
+      
+      // CRITICAL FIX: ZAMANLAYICIYI BURADA SIFIRLA! 
+      // (Fotoğraf çekmek ve göndermek zaten 5-6 saniye sürdüğü için currentTime eski kalıyordu)
+      lastPhotoTime = millis();
     }
 
     // 4) Buffer'ı temizle, bellek sızıntısını önle
@@ -236,7 +276,5 @@ void loop() {
     esp_camera_fb_return(fb);
     fb = NULL; // Güvenlik için pointerı boşa al
 
-    Serial.println("Spam koruması aktif. 30 saniye boyunca yeni fotoğraf gönderilmeyecek...");
-    } // End of if (currentTime - lastPhotoTime >= PHOTO_COOLDOWN || lastPhotoTime == 0)
   } // End of if (pirState == HIGH)
 } // End of loop()
