@@ -174,107 +174,93 @@ const int GIF_SAYISI = 12;
 // ANA DÖNGÜ (LOOP)
 // =========================================================================
 unsigned long lastPhotoTime = 0;
-const unsigned long PHOTO_COOLDOWN = 30000; // 30 saniye bekleme süresi (Spam koruması)
-const unsigned long CALIBRATION_TIME = 20000; // Başlangıçta PIR sensörünün kalibre olması için 20 sn bekleme
+int lastPirState = LOW; // Edge detection (Kenar algılama) için önceki durumu tutar
+const unsigned long PHOTO_COOLDOWN = 5000; // 5 saniye bekleme süresi (Spam koruması)
 
 void loop() {
   unsigned long currentTime = millis();
-
-
   int pirState = digitalRead(PIR_PIN);
 
-  // Hareket algılandıysa, ufak bir doğrulama yapalım (kablo teması/gürültü önlemi - debounce)
-  if (pirState == HIGH) {
-    delay(100); // 100ms bekle
-    if (digitalRead(PIR_PIN) == LOW) {
-      return; // Anlık bir gürültüyse (kablo teması vs.) yoksay
-    }
-
-    // ==========================================
-    // SPAM VE Wİ-Fİ PARAZİT KORUMASI (5 SANİYE)
-    // ==========================================
-    if (currentTime - lastPhotoTime < 5000 && lastPhotoTime != 0) {
-      return; // Sadece 5 saniyelik ufak bir sağırlık
-    }
-
-    Serial.println("Gerçek hareket algılandı! Fotoğraf çekiliyor...");
-
-    // Flaş LED'i yak
-    digitalWrite(FLASH_PIN, HIGH);
-    delay(500); // Kameranın ışığa adapte olması için kısa bir bekleme (Auto-Exposure)
-
-    // 1) Fotoğrafı çek
-    fb = esp_camera_fb_get();
+  // Sadece LOW'dan HIGH'a geçişi (ilk hareket anını) yakala
+  if (pirState == HIGH && lastPirState == LOW) {
     
-    // Çekimden hemen sonra flaş LED'i kapat
-    digitalWrite(FLASH_PIN, LOW);
+    // Spam koruması: Son işlemden bu yana yeterli süre geçti mi?
+    if (currentTime - lastPhotoTime >= PHOTO_COOLDOWN || lastPhotoTime == 0) {
+      
+      Serial.println("Gerçek hareket algılandı! Fotoğraf çekiliyor...");
 
-    if (!fb) {
-      Serial.println("Fotoğraf çekimi başarısız oldu!");
-      return;
-    }
+      // Flaş LED'i yak
+      digitalWrite(FLASH_PIN, HIGH);
+      delay(500); // Kameranın ışığa adapte olması için
 
-    // GC2145 Modülü donanımsal JPEG desteklemediğinden, resmi yazılımsal olarak JPEG'e çeviriyoruz
-    bool converted = false;
-    if (fb->format != PIXFORMAT_JPEG) {
-      Serial.println("RGB565 formatından JPEG'e dönüştürülüyor...");
-      converted = frame2jpg(fb, 12, &jpeg_buf, &jpeg_len);
-      if (!converted) {
-        Serial.println("JPEG dönüştürme işlemi başarısız!");
+      // 1) Fotoğrafı çek
+      fb = esp_camera_fb_get();
+      digitalWrite(FLASH_PIN, LOW); // Çekimden hemen sonra kapat
+
+      if (!fb) {
+        Serial.println("Fotoğraf çekimi başarısız oldu!");
+      } else {
+        // GC2145 Modülü donanımsal JPEG desteklemediğinden yazılımsal dönüşüm
+        bool converted = false;
+        if (fb->format != PIXFORMAT_JPEG) {
+          Serial.println("RGB565 formatından JPEG'e dönüştürülüyor...");
+          converted = frame2jpg(fb, 12, &jpeg_buf, &jpeg_len);
+          if (!converted) {
+            Serial.println("JPEG dönüştürme işlemi başarısız!");
+          }
+        } else {
+          jpeg_buf = fb->buf;
+          jpeg_len = fb->len;
+          converted = true; 
+        }
+
+        if (converted || fb->format == PIXFORMAT_JPEG) {
+          // 2) Gönderim için global sayacı sıfırla
+          currentByte = 0;
+
+          // 3) Telegram'a fotoğrafı binary formatta gönder
+          Serial.println("Telegram'a fotoğraf gönderiliyor...");
+          String response = bot.sendPhotoByBinary(CHAT_ID, "image/jpeg", jpeg_len,
+                                                  isMoreDataAvailable, getNextByte,
+                                                  nullptr, nullptr);
+
+          if (response == "") {
+            Serial.println("Fotoğraf gönderimi başarısız. (Telegram sunucusu yanıt vermedi)");
+          } else {
+            Serial.println("Fotoğraf başarıyla gönderildi!");
+            
+            // Yakışıklı Güvenlik konsepti - Rastgele GIF ve söz gönder
+            int randomSozIndex = random(0, SOZ_SAYISI);
+            int randomGifIndex = random(0, GIF_SAYISI);
+            
+            String caption = String("🚨 ") + yakisikliSozler[randomSozIndex];
+            String fullMessage = caption + "\n\n" + String(yakisikliGifler[randomGifIndex]);
+            
+            bot.sendMessage(CHAT_ID, fullMessage, "");
+            Serial.println("Yakışıklı Güvenlik GIF'i ve mesajı gönderildi!");
+          }
+
+          // ZAMANLAYICIYI BURADA SIFIRLA (Başarısız olsa bile spamı engellemek için)
+          lastPhotoTime = millis();
+
+          // 4) Buffer'ı temizle, bellek sızıntısını önle
+          if (converted && jpeg_buf != fb->buf) {
+            free(jpeg_buf);
+            jpeg_buf = NULL;
+          }
+        }
         esp_camera_fb_return(fb);
-        return;
+        fb = NULL; // Güvenlik için pointerı boşa al
       }
     } else {
-      jpeg_buf = fb->buf;
-      jpeg_len = fb->len;
+      Serial.println("Hareket algılandı ama spam koruması (10sn) aktif. Göz ardı ediliyor.");
     }
+  } // End of if edge detection
 
-    // 2) Gönderim için global sayacı sıfırla
-    currentByte = 0;
+  if (pirState == LOW && lastPirState == HIGH) {
+    Serial.println("Sensör tekrar hareketsiz duruma (LOW) geçti.");
+  }
 
-    // 3) Telegram'a fotoğrafı binary formatta gönder
-    Serial.println("Telegram'a fotoğraf gönderiliyor...");
-    String response = bot.sendPhotoByBinary(CHAT_ID, "image/jpeg", jpeg_len,
-                                            isMoreDataAvailable, getNextByte,
-                                            nullptr, nullptr);
-
-    if (response == "") {
-      Serial.println("Fotoğraf gönderimi başarısız.");
-    } else {
-      Serial.println("Fotoğraf başarıyla gönderildi!");
-      
-      // Yakışıklı Güvenlik konsepti - Rastgele GIF ve söz gönder
-      int randomSozIndex = random(0, SOZ_SAYISI);
-      int randomGifIndex = random(0, GIF_SAYISI);
-      
-      String caption = String("🚨 ") + yakisikliSozler[randomSozIndex];
-      String fullMessage = caption + "\n\n" + String(yakisikliGifler[randomGifIndex]);
-      
-      bot.sendMessage(CHAT_ID, fullMessage, "");
-      
-      Serial.println("Yakışıklı Güvenlik GIF'i ve mesajı gönderildi!");
-      
-      Serial.println("Sensörün kapanması (LOW) bekleniyor...");
-      int waitLimit = 0;
-      while(digitalRead(PIR_PIN) == HIGH && waitLimit < 100) {
-        delay(100); // Sensör LOW olana kadar maksimum 10 saniye bekle
-        waitLimit++;
-      }
-      
-      Serial.println("Sensör sıfırlandı veya zaman aşımı!");
-      
-      // CRITICAL FIX: ZAMANLAYICIYI BURADA SIFIRLA! 
-      // (Fotoğraf çekmek ve göndermek zaten 5-6 saniye sürdüğü için currentTime eski kalıyordu)
-      lastPhotoTime = millis();
-    }
-
-    // 4) Buffer'ı temizle, bellek sızıntısını önle
-    if (converted && jpeg_buf != NULL) {
-      free(jpeg_buf);
-      jpeg_buf = NULL;
-    }
-    esp_camera_fb_return(fb);
-    fb = NULL; // Güvenlik için pointerı boşa al
-
-  } // End of if (pirState == HIGH)
-} // End of loop()
+  lastPirState = pirState;
+  delay(50); // Döngü için ufak dengeleyici bekleme
+}
