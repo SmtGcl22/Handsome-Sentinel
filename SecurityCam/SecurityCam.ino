@@ -4,17 +4,16 @@
 #include <UniversalTelegramBot.h>
 #include <WiFiClientSecure.h>
 
-    // =========================================================================
-    // KULLANICI AYARLARI
-    // =========================================================================
-    const char *ssid = "Arçura";     // WiFi Adınız
+// =========================================================================
+// KULLANICI AYARLARI
+// =========================================================================
+const char *ssid = "Arçura";           // WiFi Adınız
 const char *password = "SMt22092003."; // WiFi Şifreniz
-const char *BOT_TOKEN = "8640490663:AAGHrGjDuRA19GfvtgRUQ43b4rUVp9jb5D8";    // Telegram Bot Token'ınız
-const char *CHAT_ID =
-    "6377884612"; // Telegram Chat ID'niz (Size ait veya grubun ID'si)
+const char *BOT_TOKEN = "8640490663:AAGHrGjDuRA19GfvtgRUQ43b4rUVp9jb5D8"; // Telegram Bot Token'ınız
+const char *CHAT_ID = "6377884612";    // Telegram Chat ID'niz
 
-#define PIR_PIN 3 // PIR Sensörünün bağlı olduğu GPIO pini (U0R pini - En temiz pin)
-#define FLASH_PIN 4 // ESP32-CAM üzerindeki flaş LED pinin GPIO pini
+#define TRIGGER_PIN 13 // Arduino Uno'dan gelecek sinyal pini (GPIO 13)
+#define FLASH_PIN 4    // ESP32-CAM üzerindeki flaş LED pini
 
 // =========================================================================
 // AI-THINKER ESP32-CAM PIN TANIMLAMALARI
@@ -42,20 +41,16 @@ const char *CHAT_ID =
 WiFiClientSecure client;
 UniversalTelegramBot bot(BOT_TOKEN, client);
 
-// Fotoğraf verisi gönderimi için kullanılan global değişkenler
 camera_fb_t *fb = NULL;
 uint8_t *jpeg_buf = NULL;
 size_t jpeg_len = 0;
 int currentByte = 0;
 
-// UniversalTelegramBot'a veri akışının devam edip etmediğini bildirir
 bool isMoreDataAvailable() {
-  if (jpeg_buf == NULL)
-    return false;
+  if (jpeg_buf == NULL) return false;
   return (currentByte < jpeg_len);
 }
 
-// UniversalTelegramBot'a gönderilecek bir sonraki byte'ı iletir
 byte getNextByte() {
   byte b = jpeg_buf[currentByte];
   currentByte++;
@@ -69,8 +64,9 @@ void setup() {
   Serial.begin(115200);
   Serial.println();
 
-  // PIR Sensör Pini ve Flaş Pini
-  pinMode(PIR_PIN, INPUT_PULLDOWN); // Sensör takılı değilken veya boşta 'floating' (kararsız) olmasını engeller
+  // Arduino'dan gelecek sinyal için pin ayarı (Active LOW)
+  pinMode(TRIGGER_PIN, INPUT_PULLUP); // Normalde HIGH duracak, Arduino LOW'a çekecek
+  
   pinMode(FLASH_PIN, OUTPUT);
   digitalWrite(FLASH_PIN, LOW); // Başlangıçta flaşı kapalı tut
 
@@ -79,8 +75,7 @@ void setup() {
   Serial.println(ssid);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  client.setCACert(
-      TELEGRAM_CERTIFICATE_ROOT); // Telegram SSL sertifikasını ayarla
+  client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
 
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
@@ -111,31 +106,19 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-
-  // Prompt gereksinimlerine göre ayarlar
-  // RHYX M21-45 (GC2145) sensöründe donanımsal JPEG sıkıştırması yoktur.
-  // Bu yüzden RAW (RGB565) formatında görüntü alıp yazılımsal olarak dönüştüreceğiz.
   config.pixel_format = PIXFORMAT_RGB565; 
   config.frame_size = FRAMESIZE_VGA;
-  config.jpeg_quality = 12; // Yazılımsal dönüştürme sırasında kullanılacak
+  config.jpeg_quality = 12; 
   config.fb_count = 1;
 
-  // Kamerayı başlat
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Kamera başlatılamadı, hata kodu: 0x%x\n", err);
     return;
   }
 
-  Serial.println("Sensör kalibrasyonu için 20 saniye bekleniyor...");
-  for (int i = 20; i > 0; i--) {
-    Serial.print(i);
-    Serial.println(" saniye kaldi...");
-    delay(1000);
-  }
-  Serial.println("Sistem hazır. Hareket bekleniyor...");
-  bot.sendMessage(CHAT_ID,
-                  "Güvenlik kamerası aktif edildi. Hareket bekleniyor...", "");
+  Serial.println("Sistem hazır. Arduino'dan sinyal bekleniyor...");
+  bot.sendMessage(CHAT_ID, "Güvenlik kamerası aktif edildi (Arduino Modeli). Hareket bekleniyor...", "");
 }
 
 // =========================================================================
@@ -173,94 +156,97 @@ const int GIF_SAYISI = 12;
 // =========================================================================
 // ANA DÖNGÜ (LOOP)
 // =========================================================================
-unsigned long lastPhotoTime = 0;
-int lastPirState = LOW; // Edge detection (Kenar algılama) için önceki durumu tutar
-const unsigned long PHOTO_COOLDOWN = 5000; // 5 saniye bekleme süresi (Spam koruması)
+int lastTriggerState = HIGH; 
 
 void loop() {
-  unsigned long currentTime = millis();
-  int pirState = digitalRead(PIR_PIN);
+  int triggerState = digitalRead(TRIGGER_PIN);
 
-  // Sadece LOW'dan HIGH'a geçişi (ilk hareket anını) yakala
-  if (pirState == HIGH && lastPirState == LOW) {
+  // ESP32, Arduino'dan gelen sinyalin HIGH'dan LOW'a düşmesini bekliyor
+  if (triggerState == LOW && lastTriggerState == HIGH) {
     
-    // Spam koruması: Son işlemden bu yana yeterli süre geçti mi?
-    if (currentTime - lastPhotoTime >= PHOTO_COOLDOWN || lastPhotoTime == 0) {
+    Serial.println("\n--- YENİ HAREKET BİLDİRİMİ ---");
+    Serial.println("Arduino'dan tetikleme geldi!");
+
+    // 1) Wi-Fi Bağlantısını Kontrol Et (Kopmuşsa Yeniden Bağlan)
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi baglantisi kopmus! Yeniden baglaniliyor...");
+      WiFi.reconnect();
       
-      Serial.println("Gerçek hareket algılandı! Fotoğraf çekiliyor...");
-
-      // Flaş LED'i yak
-      digitalWrite(FLASH_PIN, HIGH);
-      delay(500); // Kameranın ışığa adapte olması için
-
-      // 1) Fotoğrafı çek
-      fb = esp_camera_fb_get();
-      digitalWrite(FLASH_PIN, LOW); // Çekimden hemen sonra kapat
-
-      if (!fb) {
-        Serial.println("Fotoğraf çekimi başarısız oldu!");
-      } else {
-        // GC2145 Modülü donanımsal JPEG desteklemediğinden yazılımsal dönüşüm
-        bool converted = false;
-        if (fb->format != PIXFORMAT_JPEG) {
-          Serial.println("RGB565 formatından JPEG'e dönüştürülüyor...");
-          converted = frame2jpg(fb, 12, &jpeg_buf, &jpeg_len);
-          if (!converted) {
-            Serial.println("JPEG dönüştürme işlemi başarısız!");
-          }
-        } else {
-          jpeg_buf = fb->buf;
-          jpeg_len = fb->len;
-          converted = true; 
-        }
-
-        if (converted || fb->format == PIXFORMAT_JPEG) {
-          // 2) Gönderim için global sayacı sıfırla
-          currentByte = 0;
-
-          // 3) Telegram'a fotoğrafı binary formatta gönder
-          Serial.println("Telegram'a fotoğraf gönderiliyor...");
-          String response = bot.sendPhotoByBinary(CHAT_ID, "image/jpeg", jpeg_len,
-                                                  isMoreDataAvailable, getNextByte,
-                                                  nullptr, nullptr);
-
-          if (response == "") {
-            Serial.println("Fotoğraf gönderimi başarısız. (Telegram sunucusu yanıt vermedi)");
-          } else {
-            Serial.println("Fotoğraf başarıyla gönderildi!");
-            
-            // Yakışıklı Güvenlik konsepti - Rastgele GIF ve söz gönder
-            int randomSozIndex = random(0, SOZ_SAYISI);
-            int randomGifIndex = random(0, GIF_SAYISI);
-            
-            String caption = String("🚨 ") + yakisikliSozler[randomSozIndex];
-            String fullMessage = caption + "\n\n" + String(yakisikliGifler[randomGifIndex]);
-            
-            bot.sendMessage(CHAT_ID, fullMessage, "");
-            Serial.println("Yakışıklı Güvenlik GIF'i ve mesajı gönderildi!");
-          }
-
-          // ZAMANLAYICIYI BURADA SIFIRLA (Başarısız olsa bile spamı engellemek için)
-          lastPhotoTime = millis();
-
-          // 4) Buffer'ı temizle, bellek sızıntısını önle
-          if (converted && jpeg_buf != fb->buf) {
-            free(jpeg_buf);
-            jpeg_buf = NULL;
-          }
-        }
-        esp_camera_fb_return(fb);
-        fb = NULL; // Güvenlik için pointerı boşa al
+      unsigned long startAttempt = millis();
+      // 8 saniye boyunca bağlanmayı dene
+      while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 8000) {
+        delay(500);
+        Serial.print(".");
       }
-    } else {
-      Serial.println("Hareket algılandı ama spam koruması (10sn) aktif. Göz ardı ediliyor.");
+      Serial.println();
+      
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("WiFi tekrar baglandi!");
+      } else {
+        Serial.println("HATA: WiFi baglanamadi! Fotograf gonderimi iptal.");
+        return; // Bağlantı yoksa hiç deneme, atla
+      }
     }
-  } // End of if edge detection
 
-  if (pirState == LOW && lastPirState == HIGH) {
-    Serial.println("Sensör tekrar hareketsiz duruma (LOW) geçti.");
-  }
+    // 2) Fotoğraf Çek
+    Serial.println("Fotoğraf çekiliyor...");
+    digitalWrite(FLASH_PIN, HIGH);
+    delay(500); 
 
-  lastPirState = pirState;
-  delay(50); // Döngü için ufak dengeleyici bekleme
+    fb = esp_camera_fb_get();
+    digitalWrite(FLASH_PIN, LOW); 
+
+    if (!fb) {
+      Serial.println("Fotoğraf çekimi başarısız oldu!");
+    } else {
+      bool converted = false;
+      if (fb->format != PIXFORMAT_JPEG) {
+        Serial.println("RGB565 formatından JPEG'e dönüştürülüyor...");
+        converted = frame2jpg(fb, 12, &jpeg_buf, &jpeg_len);
+        if (!converted) {
+          Serial.println("JPEG dönüştürme işlemi başarısız!");
+        }
+      } else {
+        jpeg_buf = fb->buf;
+        jpeg_len = fb->len;
+        converted = true; 
+      }
+
+      if (converted || fb->format == PIXFORMAT_JPEG) {
+        currentByte = 0;
+
+        // 3) Gönderimi Yap
+        Serial.println("Telegram'a fotoğraf gönderiliyor...");
+        String response = bot.sendPhotoByBinary(CHAT_ID, "image/jpeg", jpeg_len,
+                                                isMoreDataAvailable, getNextByte,
+                                                nullptr, nullptr);
+
+        if (response == "") {
+          Serial.println("HATA: Fotoğraf gönderimi başarısız. (Telegram sunucusu yanıt vermedi veya zaman aşımı)");
+        } else {
+          Serial.println("Fotoğraf başarıyla gönderildi!");
+          
+          int randomSozIndex = random(0, SOZ_SAYISI);
+          int randomGifIndex = random(0, GIF_SAYISI);
+          
+          String caption = String("🚨 ") + yakisikliSozler[randomSozIndex];
+          String fullMessage = caption + "\n\n" + String(yakisikliGifler[randomGifIndex]);
+          
+          bot.sendMessage(CHAT_ID, fullMessage, "");
+          Serial.println("Yakışıklı Güvenlik GIF'i ve mesajı gönderildi!");
+        }
+
+        if (converted && jpeg_buf != fb->buf) {
+          free(jpeg_buf);
+          jpeg_buf = NULL;
+        }
+      }
+      esp_camera_fb_return(fb);
+      fb = NULL;
+    }
+    Serial.println("------------------------------\n");
+  } 
+
+  lastTriggerState = triggerState;
+  delay(50);
 }
